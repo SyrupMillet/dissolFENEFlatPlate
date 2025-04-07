@@ -68,7 +68,7 @@ module simulation
    !> Check for stabilization
    logical :: stabilization
 
-   real(WP) :: maxSdiffU, maxSdiffV, maxSdiffW, minSdiffU, minSdiffV, minSdiffW
+   real(WP) :: polyDissolved, polyDisRate
 
 
 contains
@@ -291,6 +291,31 @@ contains
       call cfg%sync(MixViscosity)
    end subroutine getMixViscosity
 
+   subroutine getPolyDissolved
+      use parallel, only: MPI_REAL_WP
+      use mpi_f08, only:  MPI_ALLREDUCE, MPI_SUM
+      integer :: i,j,k, ierr
+      real(WP) :: phi2local, phi2sum, fy
+
+      phi2local = 0.0_WP
+      do k=cfg%kmin_,cfg%kmax_
+         do j=cfg%jmin_,cfg%jmax_
+            do i=cfg%imin_,cfg%imax_
+               if (j .eq. cfg%jmin) then
+                  ! get the polymer flux in y direction
+                  fy = -sum(vf%itp_y(:,i,j,k)*vf%diff(i,j-1:j,k))*sum(vf%grdsc_y(:,i,j,k)*vf%SC(i,j-1:j,k))
+                  phi2local = phi2local + fy
+               end if
+            end do
+         end do
+      end do
+
+      call MPI_ALLREDUCE(phi2local, phi2sum, 1, MPI_REAL_WP, MPI_SUM, cfg%comm, ierr)
+      polyDisRate = phi2sum
+      polyDissolved = polyDissolved + polyDisRate*time%dt
+      
+   end subroutine getPolyDissolved
+
    !> Function that localizes the left (x-) of the domain
    function left_of_domain(pg,i,j,k) result(isIn)
       use pgrid_class, only: pgrid
@@ -362,6 +387,8 @@ contains
       use param, only: param_read
       use string, only: str_medium
       implicit none
+
+      polyDissolved = 0.0_WP
 
       ! Initialize time tracker with 1 subiterations
       initialize_timetracker: block
@@ -675,6 +702,8 @@ contains
          Difffile=monitor(vf%cfg%amRoot,'Diffusion')
          call Difffile%add_column(time%n,'Timestep number')
          call Difffile%add_column(time%t,'Time')
+         call Difffile%add_column(polyDissolved,'PolyDissolved')
+         call Difffile%add_column(polyDisRate,'PolyDisRate')
          call Difffile%write()
       end block create_monitor
 
@@ -983,6 +1012,7 @@ contains
          call fs%get_div(drhodt=resRHO)
 
          call computeDiffU()
+         call getPolyDissolved()
 
          ! Output to ensight
          if (ens_evt%occurs()) then

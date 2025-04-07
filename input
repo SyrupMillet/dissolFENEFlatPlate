@@ -31,10 +31,10 @@ Max Mixture viscosity : 1.0
 # Time integration
 Max timestep size : 1e-4
 Max cfl number :    0.95
-Max time :          10
+Max time :          20
 
 # Ensight output
-Ensight output period : 1e-2
+Ensight output period : 5e-2
 
 # Pressure solver
 Pressure tolerance : 	1e-5
