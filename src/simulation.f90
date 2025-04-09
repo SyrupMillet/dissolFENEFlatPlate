@@ -51,13 +51,12 @@ module simulation
    real(WP), dimension(:,:,:,:),   allocatable :: resSC,SCtmp,SR
    real(WP), dimension(:,:,:,:),   allocatable :: stress
    real(WP), dimension(:,:,:,:,:), allocatable :: gradU
-   real(WP), dimension(:,:,:), allocatable :: gradUxx
 
    real(WP) :: diff0, ad
    real(WP) :: inflowVelocity
 
-   real(WP), dimension(:,:,:), allocatable:: MixViscosity
-   real(WP) :: maxMixViscosity
+   real(WP), dimension(:,:,:), allocatable:: polyVisc
+   real(WP) :: maxPolyVisc
    real(WP) :: maxRelaxTime, minRelaxTime
 
    real(WP) :: threshold = 1.0E-5_WP
@@ -233,11 +232,8 @@ contains
          end do
       end do
 
-      gradUxx = gradU(1,1,:,:,:)
-
       ! Sync it
       call cfg%sync(gradu)
-      call cfg%sync(gradUxx)
 
       ! Deallocate velocity gradient storage
       deallocate(dudy,dudz,dvdx,dvdz,dwdx,dwdy)
@@ -267,29 +263,29 @@ contains
          do j=cfg%jmino_,cfg%jmaxo_
             do i=cfg%imino_,cfg%imaxo_
                phi2 = vf%SC(i,j,k)  ! phi2 is polymer volume fraction
-               relaxTime(i,j,k) = ve%trelax*(1.0+phi2*100_WP)
+               relaxTime(i,j,k) = ve%trelax  !*(1.0+phi2*100_WP)
             end do
          end do
       end do
       call cfg%sync(relaxTime)
    end subroutine getRelaxTime
 
-   subroutine getMixViscosity
+   subroutine getPolyViscosity
       integer :: i,j,k
       real(WP) :: phi2, tau, tauRatio
       do k=cfg%kmino_,cfg%kmaxo_
          do j=cfg%jmino_,cfg%jmaxo_
             do i=cfg%imino_,cfg%imaxo_
                phi2 = vf%SC(i,j,k)  ! phi2 is polymer volume fraction
-               tau = relaxTime(i,j,k)
-               tauRatio = (tau-minRelaxTime)/(maxRelaxTime-minRelaxTime)
-               tauRatio = max(0.0_WP,min(1.0_WP,tauRatio))
-               MixViscosity(i,j,k) = maxMixViscosity*phi2*tauRatio
+               !tau = relaxTime(i,j,k)
+               !tauRatio = (tau-minRelaxTime)/(maxRelaxTime-minRelaxTime)
+               !tauRatio = max(0.0_WP,min(1.0_WP,tauRatio))
+               polyVisc(i,j,k) = maxPolyVisc*phi2  !*tauRatio
             end do
          end do
       end do
-      call cfg%sync(MixViscosity)
-   end subroutine getMixViscosity
+      call cfg%sync(polyVisc)
+   end subroutine getPolyViscosity
 
    subroutine getPolyDissolved
       use parallel, only: MPI_REAL_WP
@@ -454,8 +450,6 @@ contains
          call param_read('Maximum polymer extensibility',ve%Lmax)
          ! Relaxation time for polymer
          call param_read('Polymer relaxation time',ve%trelax)
-         ! Polymer viscosity at zero strain rate
-         call param_read('Polymer viscosity',ve%visc_p)
          ! Configure implicit scalar solver
          ves=ddadi(cfg=cfg,name='scalar',nst=13)
          ! Setup the solver
@@ -466,11 +460,11 @@ contains
       prepareMixViscosity: block
          use param, only: param_read
          ! Read the maximum viscosity
-         call param_read('Max Mixture viscosity',maxMixViscosity)
+         call param_read('Max polymer-contribute viscosity',maxPolyVisc)
 
          ! calculate the relaxation time
          minRelaxTime = ve%trelax
-         maxRelaxTime = ve%trelax*101.0_WP
+         maxRelaxTime = ve%trelax
 
       end block prepareMixViscosity
 
@@ -511,10 +505,7 @@ contains
          allocate(stress(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
          allocate(gradU (1:3,1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
 
-         allocate(gradUxx(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
-
-         allocate(MixViscosity(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
-
+         allocate(polyVisc(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
       end block allocate_work_arrays
 
       ! Initialize our velocity field
@@ -526,8 +517,6 @@ contains
          fs%U=0.0_WP; fs%V=0.0_WP; fs%W=0.0_WP
          ! Form momentum
          call fs%rho_multiply()
-
-
          ! Apply all other boundary conditions
          ! Read the shear velocity
          call param_read('inflow velocity',inflowVelocity)
@@ -544,8 +533,6 @@ contains
             fs%U(i,j,k) = 0.0_WP ; fs%rhoU(i,j,k) = rho*0.0_WP
             fs%V(i,j,k) = 0.0_WP ; fs%rhoV(i,j,k) = rho*0.0_WP
          end do
-
-
          call fs%interp_vel(Ui,Vi,Wi)
          ! Here it should be changed to use mvdscalar
          resRHO=0.0_WP
@@ -608,16 +595,6 @@ contains
                   end do
                end do
             end do
-            ! ! Apply all other boundary conditions
-            ! call ve%get_bcond('rightwall',mybc)
-            ! do n=1,mybc%itr%no_
-            !    i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
-            !    ve%SCrec(i,j,k,1)=1.0_WP  !< Cxx
-            !    ve%SCrec(i,j,k,4)=1.0_WP  !< Cyy
-            !    ve%SCrec(i,j,k,6)=1.0_WP  !< Czz
-            ! end do
-            ! call ve%apply_bcond(time%t,time%dt)
-            ! Get eigenvalues and eigenvectors
             call ve%get_eigensystem()
          end if
 
@@ -636,18 +613,12 @@ contains
          call ens_out%add_vector('PolymerDiffVelo',PdiffUi,PdiffVi,PdiffWi)
          call ens_out%add_vector('SolventDiffVelo',SdiffUi,SdiffVi,SdiffWi)
          call ens_out%add_scalar('pressure',fs%P)
-         !call ens_out%add_scalar('diffusivity',vf%diff)
-         call ens_out%add_scalar('MixViscosity',MixViscosity)
+         call ens_out%add_scalar('polyVisc',polyVisc)
          call ens_out%add_scalar('divergence',fs%div)
          call ens_out%add_scalar('volumefraction',vf%SC)
-         call ens_out%add_scalar('gradUxx',gradUxx)
          call ens_out%add_scalar('relaxTime',relaxTime)
-         ! call ens_out%add_vector("eigenvalues",ve%eigenval(1,:,:,:),ve%eigenval(2,:,:,:),ve%eigenval(3,:,:,:))
-         ! call ens_out%add_vector("logeigenvalues",ve%eigenval_log(1,:,:,:),ve%eigenval_log(2,:,:,:),ve%eigenval_log(3,:,:,:))
          do nsc=1,ve%nscalar
             call ens_out%add_scalar(trim(ve%SCname(nsc)),ve%SCrec(:,:,:,nsc))
-            ! call ens_out%add_scalar('ln'//trim(ve%SCname(nsc)),ve%SC(:,:,:,nsc))
-            ! call ens_out%add_scalar('sctmp'//trim(ve%SCname(nsc)),SCtmp(:,:,:,nsc))
          end do
          ! Output to ensight
          if (ens_evt%occurs()) call ens_out%write_data(time%t)
@@ -759,7 +730,7 @@ contains
             PdiffV = PdiffV + fs%Vold
             PdiffW = PdiffW + fs%Wold
             call ve%get_drhoSCdt(resSC,PdiffU,PdiffV,PdiffW)
-            call ve%get_drhoSCdt(drhoSCdt=resSC,rhoU=fs%U,rhoV=fs%V,rhoW=fs%W)
+            ! call ve%get_drhoSCdt(drhoSCdt=resSC,rhoU=fs%U,rhoV=fs%V,rhoW=fs%W)
             ve%SC = ve%SCold + time%dt*resSC
          end block advance_scalar
 
@@ -862,9 +833,9 @@ contains
             call fs%get_dmomdt(resU,resV,resW)
 
             ! Assemble explicit residual
-            resU=time%dtmid*resU-(2.0_WP*fs%rhoU-2.0_WP*fs%rhoUold)
-            resV=time%dtmid*resV-(2.0_WP*fs%rhoV-2.0_WP*fs%rhoVold)
-            resW=time%dtmid*resW-(2.0_WP*fs%rhoW-2.0_WP*fs%rhoWold)
+            resU=time%dt*resU-(2.0_WP*fs%rhoU-2.0_WP*fs%rhoUold)
+            resV=time%dt*resV-(2.0_WP*fs%rhoV-2.0_WP*fs%rhoVold)
+            resW=time%dt*resW-(2.0_WP*fs%rhoW-2.0_WP*fs%rhoWold)
 
 
             ! ! ! Add polymer stress term
@@ -875,8 +846,8 @@ contains
                real(WP) :: coeff
                real(WP) :: mixvisc
 
-               ! Get the viscosity of the mixture
-               call getMixViscosity()
+               ! Get the polymer contribution viscosity \eta_p = \eta_0 - \eta_s
+               call getPolyViscosity()
 
                ! Allocate work arrays
                allocate(Txy   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
@@ -890,16 +861,13 @@ contains
                      do j=cfg%jmino_,cfg%jmaxo_
                         do i=cfg%imino_,cfg%imaxo_
                            if (ve%mask(i,j,k).ne.0) cycle                !< Skip non-solved cells
-                           mixvisc = MixViscosity(i,j,k)
+                           mixvisc = polyVisc(i,j,k)
                            do n=1,6
                               stress(i,j,k,n)=-mixvisc*stress(i,j,k,n)
                            end do
                         end do
                      end do
                   end do
-                  ! do n=1,6
-                  !    stress(:,:,:,n)=-ve%visc_p*stress(:,:,:,n)
-                  ! end do
                 case (eptt,lptt)
                   stress=0.0_WP
                   coeff=ve%visc_p/(ve%trelax*(1-ve%affinecoeff))

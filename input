@@ -14,7 +14,6 @@ polymer diameter : 0.05
 Dynamic viscosity:          0.01
 Density :                   1000
 
-Shear velocity : 1.0
 inflow velocity : 0.1
 
 # volume fraction diffusion coefficient
@@ -23,10 +22,9 @@ diffusion coefficient 0 : 5e-7
 scaling factor : 5
 
 # Non-Newtonian modeling                    
-Polymer viscosity :             0.005
 Polymer relaxation time :       1e-4
 Maximum polymer extensibility : 5
-Max Mixture viscosity : 1.0
+Max polymer-contribute viscosity : 1.0
 
 # Time integration
 Max timestep size : 1e-4
