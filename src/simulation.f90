@@ -5,7 +5,6 @@ module simulation
    use ddadi_class,       only: ddadi
    use vdscalar_class,    only: vdscalar
    use viscoelastic_class, only: viscoelastic
-   use hypre_uns_class,   only: hypre_uns
    use hypre_str_class,   only: hypre_str
    use lowmach_class,     only: lowmach
    use timetracker_class, only: timetracker
@@ -18,10 +17,9 @@ module simulation
    private
 
    !> Get an LPT solver, a lowmach solver, and corresponding time tracker, plus a couple of linear solvers
-   type(hypre_uns),     public :: ps
-   type(hypre_str),     public :: vs
+   type(hypre_str),     public :: ps
    type(viscoelastic), public :: ve
-   type(ddadi),         public :: vfs, ves
+   type(ddadi),         public :: vs, vfs, ves
    type(lowmach),       public :: fs
    type(vdscalar),      public :: vf        ! polymer Volume fraction scalar solver
    type(timetracker),   public :: time
@@ -47,25 +45,22 @@ module simulation
    real(WP), dimension(:,:,:), allocatable :: resVF,  vfTmp     ! volume fraction residual
    logical, dimension(:,:,:), allocatable :: vfbqflag
 
-   real(WP), dimension(:,:,:), allocatable :: relaxTime
    real(WP), dimension(:,:,:,:),   allocatable :: resSC,SCtmp,SR
    real(WP), dimension(:,:,:,:),   allocatable :: stress
    real(WP), dimension(:,:,:,:,:), allocatable :: gradU
 
-   real(WP) :: diff0, ad
-   real(WP) :: inflowVelocity
+   real(WP) :: inflowVelocity, Lx
+   real(WP) :: surfaceConc
 
    real(WP), dimension(:,:,:), allocatable:: polyVisc
    real(WP) :: maxPolyVisc
-   real(WP) :: maxRelaxTime, minRelaxTime
+
 
    real(WP) :: threshold = 1.0E-5_WP
-
    real(WP) :: SMALL = 1.0E-12_WP
-
-
    !> Check for stabilization
    logical :: stabilization
+
 
    real(WP) :: polyDissolved, polyDisRate
 
@@ -239,37 +234,6 @@ contains
       deallocate(dudy,dudz,dvdx,dvdz,dwdx,dwdy)
    end subroutine applyExtraGradU
 
-   subroutine getDiffutionCoeff
-      integer :: i,j,k
-      real(WP) :: diff, phi1
-      vf%diff = 0.0_WP
-      do k=cfg%kmin_,cfg%kmax_
-         do j=cfg%jmin_,cfg%jmax_
-            do i=cfg%imin_,cfg%imax_
-               phi1 = 1.0_WP-vf%SC(i,j,k)    ! phi1 is solvent volume fraction
-               diff = diff0*exp(ad*phi1)
-               vf%diff(i,j,k) = diff
-            end do
-         end do
-      end do
-      call cfg%sync(vf%diff)
-   end subroutine getDiffutionCoeff
-
-   subroutine getRelaxTime
-      integer :: i,j,k
-      real(WP) :: phi2
-      relaxTime = ve%trelax
-      do k=cfg%kmino_,cfg%kmaxo_
-         do j=cfg%jmino_,cfg%jmaxo_
-            do i=cfg%imino_,cfg%imaxo_
-               phi2 = vf%SC(i,j,k)  ! phi2 is polymer volume fraction
-               relaxTime(i,j,k) = ve%trelax  !*(1.0+phi2*100_WP)
-            end do
-         end do
-      end do
-      call cfg%sync(relaxTime)
-   end subroutine getRelaxTime
-
    subroutine getPolyViscosity
       integer :: i,j,k
       real(WP) :: phi2, tau, tauRatio
@@ -277,9 +241,6 @@ contains
          do j=cfg%jmino_,cfg%jmaxo_
             do i=cfg%imino_,cfg%imaxo_
                phi2 = vf%SC(i,j,k)  ! phi2 is polymer volume fraction
-               !tau = relaxTime(i,j,k)
-               !tauRatio = (tau-minRelaxTime)/(maxRelaxTime-minRelaxTime)
-               !tauRatio = max(0.0_WP,min(1.0_WP,tauRatio))
                polyVisc(i,j,k) = maxPolyVisc*phi2  !*tauRatio
             end do
          end do
@@ -309,7 +270,7 @@ contains
       call MPI_ALLREDUCE(phi2local, phi2sum, 1, MPI_REAL_WP, MPI_SUM, cfg%comm, ierr)
       polyDisRate = phi2sum
       polyDissolved = polyDissolved + polyDisRate*time%dt
-      
+
    end subroutine getPolyDissolved
 
    !> Function that localizes the left (x-) of the domain
@@ -320,7 +281,7 @@ contains
       integer, intent(in) :: i,j,k
       logical :: isIn
       isIn=.false.
-      if (i.eq.pg%imin .and. j.gt.cfg%jmin) isIn=.true.
+      if (i.eq.pg%imin) isIn=.true.
    end function left_of_domain
 
    !> Function that localizes the left (x-) of the domain for scalar
@@ -337,7 +298,6 @@ contains
    !> Function that localizes the right (x+) of the domain
    function right_of_domain(pg,i,j,k) result(isIn)
       use pgrid_class, only: pgrid
-      implicit none
       class(pgrid), intent(in) :: pg
       integer, intent(in) :: i,j,k
       logical :: isIn
@@ -353,8 +313,18 @@ contains
       integer, intent(in) :: i,j,k
       logical :: isIn
       isIn=.false.
-      if (j.eq.pg%jmin) isIn=.true.
+      if (j.eq.pg%jmin .and. cfg%xm(i).gt.(0.1_WP*Lx)) isIn=.true.
    end function bottom_of_domain
+
+   function bottom_of_domain_m(pg,i,j,k) result(isIn)
+      use pgrid_class, only: pgrid
+      implicit none
+      class(pgrid), intent(in) :: pg
+      integer, intent(in) :: i,j,k
+      logical :: isIn
+      isIn=.false.
+      if (j.eq.pg%jmin .and. cfg%xm(i).le.(0.1_WP*Lx)) isIn=.true.
+   end function bottom_of_domain_m
 
    !> Function that localizes the bottom (y-) of the domain for scalar
    function bottom_of_domainsc(pg,i,j,k) result(isIn)
@@ -364,7 +334,7 @@ contains
       integer, intent(in) :: i,j,k
       logical :: isIn
       isIn=.false.
-      if (j.eq.pg%jmin-1) isIn=.true.
+      if (j.eq.pg%jmin-1 .and. cfg%xm(i).gt.(0.1_WP*Lx)) isIn=.true.
    end function bottom_of_domainsc
 
    !> Function that localizes the top (y+) of the domain
@@ -385,6 +355,7 @@ contains
       implicit none
 
       polyDissolved = 0.0_WP
+      call param_read('Lx',Lx)
 
       ! Initialize time tracker with 1 subiterations
       initialize_timetracker: block
@@ -398,28 +369,27 @@ contains
 
       ! Create a low Mach flow solver with bconds
       create_flow_solver: block
-         use hypre_uns_class, only: gmres_amg
-         use hypre_str_class, only: pcg_pfmg
+         use hypre_str_class, only: pcg_pfmg2
          use lowmach_class,   only: dirichlet,clipped_neumann, neumann, slip
          ! Create flow solver
          fs=lowmach(cfg=cfg,name='Variable density low Mach NS')
          ! Define bc
-         call fs%add_bcond(name='inflow',type=dirichlet      ,locator=left_of_domain ,face='x',dir=-1,canCorrect=.false.)
-         call fs%add_bcond(name='outflow',type=clipped_neumann,   locator=right_of_domain,face='x',dir=+1,canCorrect=.true.)
-         call fs%add_bcond(name='topfreebd',type=slip      ,locator=top_of_domain,face='y',dir=+1,canCorrect=.false.)
-         call fs%add_bcond(name='bottom',type=dirichlet      ,locator=bottom_of_domainsc,face='y',dir=-1,canCorrect=.false.)
+         call fs%add_bcond(name='inflow',type=dirichlet         ,locator=left_of_domain ,face='x',dir=-1,canCorrect=.false.)
+         call fs%add_bcond(name='outflow',type=clipped_neumann  ,locator=right_of_domain,face='x',dir=+1,canCorrect=.true.)
+         call fs%add_bcond(name='topfreebd',type=slip           ,locator=top_of_domain,face='y',dir=+1,canCorrect=.false.)
+         call fs%add_bcond(name='bottom',type=dirichlet         ,locator=bottom_of_domain,face='y',dir=-1,canCorrect=.false.)
+         call fs%add_bcond(name='bottom_m',type=clipped_neumann ,locator=bottom_of_domain_m,face='y',dir=-1,canCorrect=.true.)
          ! Assign constant viscosity
          call param_read('Dynamic viscosity',visc); fs%visc=visc
          ! Assign constant density
          call param_read('Density',rho); fs%rho=rho
          ! Configure pressure solver
-         ps=hypre_uns(cfg=cfg,name='Pressure',method=gmres_amg,nst=7)
+         ps=hypre_str(cfg=cfg,name='Pressure',method=pcg_pfmg2,nst=7)
+         ps%maxlevel=18
          call param_read('Pressure iteration',ps%maxit)
          call param_read('Pressure tolerance',ps%rcvg)
          ! Configure implicit velocity solver
-         vs=hypre_str(cfg=cfg,name='Velocity',method=pcg_pfmg,nst=7)
-         call param_read('Implicit iteration',vs%maxit)
-         call param_read('Implicit tolerance',vs%rcvg)
+         vs=ddadi(cfg=cfg,name='Velocity',nst=7)
          ! Setup the solver
          call fs%setup(pressure_solver=ps,implicit_solver=vs)
       end block create_flow_solver
@@ -446,27 +416,21 @@ contains
          integer :: i,j,k
          ! Create FENE model solver
          call ve%init(cfg=cfg,model=fenep,scheme=upwind,name='FENE')
+         ! Define bc
+         call ve%add_bcond(name='inflow',type=dirichlet      ,locator=left_of_domainsc,dir='x-')
+         call ve%add_bcond(name='outflow',type=neumann      ,locator=right_of_domain,dir='x+')
          ! Maximum extensibility of polymer chain
          call param_read('Maximum polymer extensibility',ve%Lmax)
          ! Relaxation time for polymer
          call param_read('Polymer relaxation time',ve%trelax)
+         ! Maximum  polymer-contributed viscosity
+         call param_read('Max polymer-contributed viscosity',maxPolyVisc)
          ! Configure implicit scalar solver
          ves=ddadi(cfg=cfg,name='scalar',nst=13)
          ! Setup the solver
          call ve%setup(implicit_solver=ves)
          ! call ve%setup()
       end block create_viscoelastic
-
-      prepareMixViscosity: block
-         use param, only: param_read
-         ! Read the maximum viscosity
-         call param_read('Max polymer-contribute viscosity',maxPolyVisc)
-
-         ! calculate the relaxation time
-         minRelaxTime = ve%trelax
-         maxRelaxTime = ve%trelax
-
-      end block prepareMixViscosity
 
 
       ! Allocate work arrays
@@ -497,8 +461,6 @@ contains
          allocate(PdiffVi (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)) ; PdiffVi = 0.0_WP
          allocate(PdiffWi (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)) ; PdiffWi = 0.0_WP
 
-         allocate(relaxTime(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
-
          allocate(resSC (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
          allocate(SCtmp (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
          allocate(SR    (1:6,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
@@ -520,18 +482,19 @@ contains
          ! Apply all other boundary conditions
          ! Read the shear velocity
          call param_read('inflow velocity',inflowVelocity)
+
          call fs%apply_bcond(time%t,time%dt)
          call fs%get_bcond('inflow',mybc)
          do n=1,mybc%itr%no_
             i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
             fs%U(i,j,k) = inflowVelocity ; fs%rhoU(i,j,k) = rho*inflowVelocity
-            fs%V(i-1,j,k) = 0.0_WP ; fs%rhoV(i-1,j,k) = rho*0.0_WP
+            ! fs%V(i-1,j,k) = 0.0_WP ; fs%rhoV(i-1,j,k) = rho*0.0_WP
          end do
          call fs%get_bcond('bottom',mybc)
          do n=1,mybc%itr%no_
             i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
             fs%U(i,j,k) = 0.0_WP ; fs%rhoU(i,j,k) = rho*0.0_WP
-            fs%V(i,j,k) = 0.0_WP ; fs%rhoV(i,j,k) = rho*0.0_WP
+            ! fs%V(i,j,k) = 0.0_WP ; fs%rhoV(i,j,k) = rho*0.0_WP
          end do
          call fs%interp_vel(Ui,Vi,Wi)
          ! Here it should be changed to use mvdscalar
@@ -546,14 +509,16 @@ contains
          use vdscalar_class, only: bcond
          type(bcond), pointer :: mybc
          integer :: i,j,k,n
+         real(WP) :: diff
 
          vf%SC=0.0_WP
 
          ! read diffusivity
          vf%rho = rho
-         call param_read('diffusion coefficient 0',diff0)
-         call param_read('scaling factor',ad)
-         call getDiffutionCoeff()
+         call param_read('diffusion coefficient',diff)
+         vf%diff = diff
+
+         call param_read('Polymer interface concentration',surfaceConc)
 
          call vf%apply_bcond(time%t,time%dt)
          ! Apply all other boundary conditions
@@ -565,8 +530,8 @@ contains
          call vf%get_bcond('bottom',mybc)
          do n=1,mybc%itr%no_
             i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
-            vf%SC(i,j,k) = 0.5_WP
-         end do 
+            vf%SC(i,j,k) = surfaceConc
+         end do
 
       end block initialize_volume_fraction
 
@@ -616,7 +581,6 @@ contains
          call ens_out%add_scalar('polyVisc',polyVisc)
          call ens_out%add_scalar('divergence',fs%div)
          call ens_out%add_scalar('volumefraction',vf%SC)
-         call ens_out%add_scalar('relaxTime',relaxTime)
          do nsc=1,ve%nscalar
             call ens_out%add_scalar(trim(ve%SCname(nsc)),ve%SCrec(:,:,:,nsc))
          end do
@@ -678,6 +642,40 @@ contains
          call Difffile%write()
       end block create_monitor
 
+      ! Output system characteristic information
+      Output_system_info: block
+         use monitor_class,     only: monitor
+         use param,       only: param_read
+         type(monitor) :: sysfile
+         real(WP) :: We, Re, delta, shearRate, beta
+         real(WP) :: charL
+
+         charL = 0.5_WP*Lx
+         ! Reynolds number for flat plate
+         Re = rho*inflowVelocity*charL/visc
+         ! Get boundary layer thickness from Blasius solution
+         delta = 4.99_WP*charL/sqrt(Re)
+         ! Get shear rate
+         shearRate = inflowVelocity/delta
+         ! Get Weissenberg number
+         We = shearRate*ve%trelax
+         ! Ratio of polymer viscosity to solvent viscosity
+         beta = maxPolyVisc/visc
+
+         ! Create system monitor
+         sysfile=monitor(fs%cfg%amRoot,'system')
+         call sysfile%add_column(Re,'Reynolds number')
+         call sysfile%add_column(We,'Weissenberg number')
+         call sysfile%add_column(delta,'Boundary layer thickness')
+         call sysfile%add_column(shearRate,'Shear rate')
+         call sysfile%add_column(beta,'Polymer viscosity ratio')
+         call sysfile%add_column(ve%Lmax,'Maximum extensibility')
+         call sysfile%add_column(ve%trelax,'Relaxation time')
+         call sysfile%write()
+
+      end block Output_system_info
+
+
    end subroutine simulation_init
 
 
@@ -714,7 +712,7 @@ contains
 
          ! Calculate grad(U)
          call fs%get_gradu(gradu)
-         call applyExtraGradU()
+         ! call applyExtraGradU()
 
          ! Transport our liquid conformation tensor using log conformation
          advance_scalar: block
@@ -729,8 +727,8 @@ contains
             PdiffU = PdiffU + fs%Uold
             PdiffV = PdiffV + fs%Vold
             PdiffW = PdiffW + fs%Wold
-            call ve%get_drhoSCdt(resSC,PdiffU,PdiffV,PdiffW)
-            ! call ve%get_drhoSCdt(drhoSCdt=resSC,rhoU=fs%U,rhoV=fs%V,rhoW=fs%W)
+            ! call ve%get_drhoSCdt(resSC,PdiffU,PdiffV,PdiffW)
+            call ve%get_drhoSCdt(drhoSCdt=resSC,rhoU=fs%U,rhoV=fs%V,rhoW=fs%W)
             ve%SC = ve%SCold + time%dt*resSC
          end block advance_scalar
 
@@ -742,16 +740,28 @@ contains
             ! Reconstruct conformation tensor from eigenvalues and eigenvectors
             call ve%reconstruct_conformation()
             ! Add in relaxtion source from semi-anlaytical integration
-            call getRelaxTime()
-            call ve%get_relax_analytical_varyRelxTime(relaxTime,time%dt)
-            ! call ve%get_relax_analytical(time%dt)
+            call ve%get_relax_analytical(time%dt)
+
+            ve_bc : block
+               use multiscalar_class, only: bcond
+               type(bcond), pointer :: mybc
+               integer :: n,i,j,k
+               ! Apply all other boundary conditions
+               call ve%get_bcond('inflow',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  ve%SCrec(i,j,k,:) = 0.0_WP
+                  ve%SCrec(i,j,k,1)=1.0_WP ; ve%SCrec(i,j,k,4)=1.0_WP ; ve%SCrec(i,j,k,6)=1.0_WP
+               end do
+            end block ve_bc
+
             ! Reconstruct lnC for next time step
             !> get eigenvalues and eigenvectors based on reconstructed C
             call ve%get_eigensystem_SCrec()
             !> Reconstruct lnC from eigenvalues and eigenvectors
             call ve%reconstruct_log_conformation()
+            call ve%apply_bcond(time%t,time%dt)
          end if
-
 
          ! ==============================================================================
 
@@ -767,9 +777,6 @@ contains
             fs%W=0.5_WP*(fs%W+fs%Wold); fs%rhoW=0.5_WP*(fs%rhoW+fs%rhoWold)
 
             ! ==================== Volume Fraction Solver ==================
-
-            call getDiffutionCoeff()
-
             call vf%metric_reset()
 
             ! Buid mid-time volume fraction
@@ -782,16 +789,16 @@ contains
             !< Get temperary solution for bquick
             vfTmp = 2.0_WP*vf%SC - vf%SCold + resVF/vf%rho
 
-            vfbqflag = .false.
-            do k=vf%cfg%kmino_,vf%cfg%kmaxo_
-               do j=vf%cfg%jmino_,vf%cfg%jmaxo_
-                  do i=vf%cfg%imino_,vf%cfg%imaxo_
-                     if ((vfTmp(i,j,k).lt.0.0_WP).or.(vfTmp(i,j,k).gt.1.0_WP)) then
-                        vfbqflag(i,j,k) = .true.
-                     end if
-                  end do
-               end do
-            end do
+            ! vfbqflag = .false.
+            ! do k=vf%cfg%kmino_,vf%cfg%kmaxo_
+            !    do j=vf%cfg%jmino_,vf%cfg%jmaxo_
+            !       do i=vf%cfg%imino_,vf%cfg%imaxo_
+            !          if ((vfTmp(i,j,k).lt.0.0_WP).or.(vfTmp(i,j,k).gt.1.0_WP)) then
+            !             vfbqflag(i,j,k) = .true.
+            !          end if
+            !       end do
+            !    end do
+            ! end do
             ! all bquick to avoid oscillations
             vfbqflag = .true.
 
@@ -823,7 +830,7 @@ contains
                call vf%get_bcond('bottom',mybc)
                do n=1,mybc%itr%no_
                   i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
-                  vf%SC(i,j,k) = 0.5_WP
+                  vf%SC(i,j,k) = surfaceConc
                end do
             end block vf_bc
 
@@ -856,7 +863,7 @@ contains
                ! Build liquid stress tensor
                select case (ve%model)
                 case (fenep, oldroydb)
-                  call ve%get_relax_varyRelaxTime(relaxTime,stress,time%dt)
+                  call ve%get_relax(stress,time%dt)
                   do k=cfg%kmino_,cfg%kmaxo_
                      do j=cfg%jmino_,cfg%jmaxo_
                         do i=cfg%imino_,cfg%imaxo_
@@ -939,18 +946,19 @@ contains
                do n=1,mybc%itr%no_
                   i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
                   fs%U(i,j,k) = inflowVelocity ; fs%rhoU(i,j,k) = rho*inflowVelocity
-                  fs%V(i-1,j,k) = 0.0_WP ; fs%rhoV(i-1,j,k) = rho*0.0_WP
+                  ! fs%V(i-1,j,k) = 0.0_WP ; fs%rhoV(i-1,j,k) = rho*0.0_WP
                end do
                call fs%get_bcond('bottom',mybc)
                do n=1,mybc%itr%no_
                   i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
                   fs%U(i,j,k) = 0.0_WP ; fs%rhoU(i,j,k) = rho*0.0_WP
-                  fs%V(i,j,k) = 0.0_WP ; fs%rhoV(i,j,k) = rho*0.0_WP
+                  ! fs%V(i,j,k) = 0.0_WP ; fs%rhoV(i,j,k) = rho*0.0_WP
                end do
             end block fs_bc
 
             ! Solve Poisson equation
             call fs%correct_mfr(drhodt=resRHO)
+            call fs%rho_divide()
             call fs%get_div(drhodt=resRHO)
             fs%psolv%rhs=-fs%cfg%vol*fs%div/time%dtmid
             fs%psolv%sol=0.0_WP

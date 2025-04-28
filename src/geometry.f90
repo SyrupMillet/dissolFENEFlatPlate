@@ -40,25 +40,28 @@ contains
          end do
 
          ! refine the mesh near to the wall, use a step function for dy
-         allocate(weights(ny))
-         center = (real(ny,WP)-1.0_WP)/5.0_WP   ! center of step function
-         delta = 1.0_WP/2.0_WP                  ! dy(1):dy(ny) = 1-delta:1+delta
-         ks = 0.1_WP*128.0_WP/real(ny,WP)       ! control the variance
-         do j=0,ny-1
-            if (ks*center .gt. 0.0_WP) then
-               dominator = tanh(ks*center)
-            else
-               dominator = 1.0_WP
-            end if
-            weights(j+1) = 1.0_WP + delta*tanh(ks*(real(j,WP)-center))/dominator
-         end do
-         weights = weights/sum(weights)
-         y(1) = 0.0_WP
-         do j=2,ny+1
-            y(j) = y(j-1) + weights(j-1)*Ly
-         end do
+         ! allocate(weights(ny))
+         ! center = (real(ny,WP)-1.0_WP)/5.0_WP   ! center of step function
+         ! delta = 1.0_WP/2.0_WP                  ! dy(1):dy(ny) = 1-delta:1+delta
+         ! ks = 0.1_WP*128.0_WP/real(ny,WP)       ! control the variance
+         ! do j=0,ny-1
+         !    if (ks*center .gt. 0.0_WP) then
+         !       dominator = tanh(ks*center)
+         !    else
+         !       dominator = 1.0_WP
+         !    end if
+         !    weights(j+1) = 1.0_WP + delta*tanh(ks*(real(j,WP)-center))/dominator
+         ! end do
+         ! weights = weights/sum(weights)
+         ! y(1) = 0.0_WP
+         ! do j=2,ny+1
+         !    y(j) = y(j-1) + weights(j-1)*Ly
+         ! end do
+         ! deallocate(weights)
 
-         deallocate(weights)
+         do j=1,ny+1
+            y(j)=real(j-1,WP)*Ly/real(ny,WP)
+         end do
 
          do k=1,nz+1
             z(k)=real(k-1,WP)*Lz/real(nz,WP)-0.5_WP*Lz
@@ -81,17 +84,21 @@ contains
 
       ! Create walls for x<0
       create_walls: block
+         real(WP) :: Lx
          integer :: i,j,k
+
+         call param_read('Lx',Lx)
+
          cfg%VF=1.0_WP
-         do k = cfg%kmino_, cfg%kmaxo_
-            do j = cfg%jmino_, cfg%jmaxo_
-               do i = cfg%imino_, cfg%imaxo_
-                  if (j.lt.cfg%jmin) then
-                     cfg%VF(i,j,k)=0.0_WP
-                  end if
-               end do
-            end do
-         end do
+         ! do k = cfg%kmino_, cfg%kmaxo_
+         !    do j = cfg%jmino_, cfg%jmaxo_
+         !       do i = cfg%imino_, cfg%imaxo_
+         !          if (j.lt.cfg%jmin .and. cfg%xm(i).gt.(0.1_WP*Lx)) then
+         !             cfg%VF(i,j,k)=0.0_WP
+         !          end if
+         !       end do
+         !    end do
+         ! end do
 
       end block create_walls
 
