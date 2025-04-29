@@ -16,7 +16,7 @@ Density :                   1000
 inflow velocity : 0.05                           # U
 
 # Polymer field
-Polymer interface concentration : 0.0       
+Polymer interface concentration : 0.1       
 diffusion coefficient : 5e-6                    # D
 
 # Non-Newtonian modeling                
@@ -30,7 +30,7 @@ Max cfl number :    0.95
 Max time :          20
 
 # Ensight output
-Ensight output period : 1e-2
+Ensight output period : 1e-3
 
 # Pressure solver
 Pressure tolerance : 	1e-6

@@ -18,7 +18,7 @@ module simulation
 
    !> Get an LPT solver, a lowmach solver, and corresponding time tracker, plus a couple of linear solvers
    type(hypre_str),     public :: ps
-   type(viscoelastic), public :: ve
+   type(viscoelastic),  public :: ve
    type(ddadi),         public :: vs, vfs, ves
    type(lowmach),       public :: fs
    type(vdscalar),      public :: vf        ! polymer Volume fraction scalar solver
@@ -45,21 +45,21 @@ module simulation
    real(WP), dimension(:,:,:), allocatable :: resVF,  vfTmp     ! volume fraction residual
    logical, dimension(:,:,:), allocatable :: vfbqflag
 
-   real(WP), dimension(:,:,:,:),   allocatable :: resSC,SCtmp,SR
+   real(WP), dimension(:,:,:,:),   allocatable :: resSC, SCtmp1, SCtmp2
    real(WP), dimension(:,:,:,:),   allocatable :: stress
    real(WP), dimension(:,:,:,:,:), allocatable :: gradU
 
    real(WP) :: inflowVelocity, Lx
    real(WP) :: surfaceConc
 
+   real(WP) :: polydiff
    real(WP), dimension(:,:,:), allocatable:: polyVisc
    real(WP) :: maxPolyVisc
 
-
    real(WP) :: threshold = 1.0E-5_WP
    real(WP) :: SMALL = 1.0E-12_WP
-   !> Check for stabilization
-   logical :: stabilization
+   ! synmetric identity tensor           xx      xy/yx   xz/zx   yy      yz/zy   zz
+   real(WP), dimension(6) :: identity = [1.0_WP, 0.0_WP, 0.0_WP, 1.0_WP, 0.0_WP, 1.0_WP]
 
 
    real(WP) :: polyDissolved, polyDisRate
@@ -415,10 +415,11 @@ contains
          use viscoelastic_class,  only: oldroydb, fenep
          integer :: i,j,k
          ! Create FENE model solver
-         call ve%init(cfg=cfg,model=fenep,scheme=upwind,name='FENE')
+         call ve%init(cfg=cfg,model=fenep,scheme=bquick,name='FENE')
          ! Define bc
          call ve%add_bcond(name='inflow',type=dirichlet      ,locator=left_of_domainsc,dir='x-')
-         call ve%add_bcond(name='outflow',type=neumann      ,locator=right_of_domain,dir='x+')
+         call ve%add_bcond(name='outflow',type=neumann       ,locator=right_of_domain,dir='x+')
+         call ve%add_bcond(name='bottom',type=dirichlet      ,locator=bottom_of_domainsc,dir='y-')
          ! Maximum extensibility of polymer chain
          call param_read('Maximum polymer extensibility',ve%Lmax)
          ! Relaxation time for polymer
@@ -461,11 +462,11 @@ contains
          allocate(PdiffVi (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)) ; PdiffVi = 0.0_WP
          allocate(PdiffWi (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)) ; PdiffWi = 0.0_WP
 
-         allocate(resSC (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
-         allocate(SCtmp (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
-         allocate(SR    (1:6,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
-         allocate(stress(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
-         allocate(gradU (1:3,1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
+         allocate(resSC  (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
+         allocate(SCtmp1 (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
+         allocate(SCtmp2 (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
+         allocate(stress (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
+         allocate(gradU  (1:3,1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
 
          allocate(polyVisc(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
       end block allocate_work_arrays
@@ -509,14 +510,13 @@ contains
          use vdscalar_class, only: bcond
          type(bcond), pointer :: mybc
          integer :: i,j,k,n
-         real(WP) :: diff
 
          vf%SC=0.0_WP
 
          ! read diffusivity
          vf%rho = rho
-         call param_read('diffusion coefficient',diff)
-         vf%diff = diff
+         call param_read('diffusion coefficient',polydiff)
+         vf%diff = polydiff
 
          call param_read('Polymer interface concentration',surfaceConc)
 
@@ -536,32 +536,55 @@ contains
       end block initialize_volume_fraction
 
       ! Initialize viscoelastic solver
+      ! Here \phi*C is calculated instead of C
       initialize_viscoelastic: block
          use param, only: param_read
          use multiscalar_class, only: bcond
          type(bcond), pointer :: mybc
          integer :: n,i,j,k
-         ! Check first if we use stabilization
-         call param_read('Stabilization',stabilization,default=.true.)
 
-         if (stabilization) then
-            !> Allocate storage fo eigenvalues and vectors
-            allocate(ve%eigenval    (1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)); ve%eigenval=0.0_WP
-            allocate(ve%eigenvec(1:3,1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)); ve%eigenvec=0.0_WP
-            allocate(ve%eigenval_log(1:3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)); ve%eigenval_log=0.0_WP
-            !> Allocate storage for reconstructured C
-            allocate(ve%SCrec   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6)); ve%SCrec=0.0_WP
+         !> Allocate storage for reconstructured C from \phi*C
+         allocate(ve%SCrec   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:6))
+
+         do k=cfg%kmino_,cfg%kmaxo_
+            do j=cfg%jmino_,cfg%jmaxo_
+               do i=cfg%imino_,cfg%imaxo_
+                  ve%SC(i,j,k,:) = vf%SC(i,j,k)*identity
+               end do
+            end do
+         end do
+
+         ! Apply boundary conditions
+         call ve%apply_bcond(time%t,time%dt)
+         call ve%get_bcond('inflow',mybc)
+         do n=1,mybc%itr%no_
+            i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+            ve%SC(i,j,k,:) = 0.0_WP*identity
+         end do
+         call ve%get_bcond('bottom',mybc)
+         do n=1,mybc%itr%no_
+            i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+            ve%SC(i,j,k,:) = surfaceConc*identity
+         end do
+
+         rec_C : block
+            ! Reconstruct the C tensor from \phi*C
+            integer :: i, j, k
+            real(WP) :: phi
             do k=cfg%kmino_,cfg%kmaxo_
                do j=cfg%jmino_,cfg%jmaxo_
                   do i=cfg%imino_,cfg%imaxo_
-                     ve%SCrec(i,j,k,1)=1.0_WP  !< Cxx
-                     ve%SCrec(i,j,k,4)=1.0_WP  !< Cyy
-                     ve%SCrec(i,j,k,6)=1.0_WP  !< Czz
+                     phi = vf%SC(i,j,k)
+                     if (phi .lt. threshold) then
+                        ve%SCrec(i,j,k,:) = identity
+                     else
+                        ve%SCrec(i,j,k,:) = ve%SC(i,j,k,:)/phi
+                     end if
                   end do
                end do
             end do
-            call ve%get_eigensystem()
-         end if
+         end block rec_C
+
 
       end block initialize_viscoelastic
 
@@ -594,9 +617,7 @@ contains
          call fs%get_cfl(time%dt,time%cfl)
          call fs%get_max()
          call vf%get_max()
-         if (stabilization) then
-            call ve%get_max_reconstructed()
-         end if
+         call ve%get_max_reconstructed()
          ! Create simulation monitor
          mfile=monitor(fs%cfg%amRoot,'simulation')
          call mfile%add_column(time%n,'Timestep number')
@@ -626,12 +647,10 @@ contains
          scfile=monitor(ve%cfg%amRoot,'scalar')
          call scfile%add_column(time%n,'Timestep number')
          call scfile%add_column(time%t,'Time')
-         if (stabilization) then
-            do nsc=1,ve%nscalar
-               call scfile%add_column(ve%SCrecmin(nsc),trim(ve%SCname(nsc))//'_min')
-               call scfile%add_column(ve%SCrecmax(nsc),trim(ve%SCname(nsc))//'_max')
-            end do
-         end if
+         do nsc=1,ve%nscalar
+            call scfile%add_column(ve%SCrecmin(nsc),trim(ve%SCname(nsc))//'_min')
+            call scfile%add_column(ve%SCrecmax(nsc),trim(ve%SCname(nsc))//'_max')
+         end do
          call scfile%write()
          ! Create Diffusion monitor
          Difffile=monitor(vf%cfg%amRoot,'Diffusion')
@@ -710,60 +729,60 @@ contains
 
          ! ======================= conformation tensor solver ===========================
 
-         ! Calculate grad(U)
-         call fs%get_gradu(gradu)
-         ! call applyExtraGradU()
+         ! ! Calculate grad(U)
+         ! call fs%get_gradu(gradu)
+         ! ! call applyExtraGradU()
 
-         ! Transport our liquid conformation tensor using log conformation
-         advance_scalar: block
-            use, intrinsic :: ieee_arithmetic
-            integer :: ierr
-            integer :: i,j,k,nsc
-            ! Add streching source term for constitutive model
-            call ve%get_CgradU_log(gradU,SCtmp); resSC=SCtmp
-            ve%SC=ve%SC+time%dt*resSC
-            ve%SCold=ve%SC
-            ! Explicit calculation of dSC/dt from scalar equation
-            PdiffU = PdiffU + fs%Uold
-            PdiffV = PdiffV + fs%Vold
-            PdiffW = PdiffW + fs%Wold
-            ! call ve%get_drhoSCdt(resSC,PdiffU,PdiffV,PdiffW)
-            call ve%get_drhoSCdt(drhoSCdt=resSC,rhoU=fs%U,rhoV=fs%V,rhoW=fs%W)
-            ve%SC = ve%SCold + time%dt*resSC
+         ! ! Transport our liquid conformation tensor using log conformation
+         ! advance_scalar: block
+         !    use, intrinsic :: ieee_arithmetic
+         !    integer :: ierr
+         !    integer :: i,j,k,nsc
+         !    ! Add streching source term for constitutive model
+         !    call ve%get_CgradU_log(gradU,SCtmp); resSC=SCtmp
+         !    ve%SC=ve%SC+time%dt*resSC
+         !    ve%SCold=ve%SC
+         !    ! Explicit calculation of dSC/dt from scalar equation
+         !    PdiffU = PdiffU + fs%Uold
+         !    PdiffV = PdiffV + fs%Vold
+         !    PdiffW = PdiffW + fs%Wold
+         !    ! call ve%get_drhoSCdt(resSC,PdiffU,PdiffV,PdiffW)
+         !    call ve%get_drhoSCdt(drhoSCdt=resSC,rhoU=fs%U,rhoV=fs%V,rhoW=fs%W)
+         !    ve%SC = ve%SCold + time%dt*resSC
 
-            call ve%apply_bcond(time%t,time%dt)
-         end block advance_scalar
+         !    call ve%apply_bcond(time%t,time%dt)
+         ! end block advance_scalar
 
 
-         ! Add in relaxation forcing and reconstruct C
-         if (stabilization) then
-            ! Get eigenvalues and eigenvectors from lnC
-            call ve%get_eigensystem()
-            ! Reconstruct conformation tensor from eigenvalues and eigenvectors
-            call ve%reconstruct_conformation()
-            ! Add in relaxtion source from semi-anlaytical integration
-            call ve%get_relax_analytical(time%dt)
+         ! ! Add in relaxation forcing and reconstruct C
+         ! if (stabilization) then
+         !    ! Get eigenvalues and eigenvectors from lnC
+         !    call ve%get_eigensystem()
+         !    ! Reconstruct conformation tensor from eigenvalues and eigenvectors
+         !    call ve%reconstruct_conformation()
+         !    ! Add in relaxtion source from semi-anlaytical integration
+         !    call ve%get_relax_analytical(time%dt)
 
-            ve_bc : block
-               use multiscalar_class, only: bcond
-               type(bcond), pointer :: mybc
-               integer :: n,i,j,k
-               ! Apply all other boundary conditions
-               call ve%get_bcond('inflow',mybc)
-               do n=1,mybc%itr%no_
-                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
-                  ve%SCrec(i,j,k,:) = 0.0_WP
-                  ve%SCrec(i,j,k,1)=1.0_WP ; ve%SCrec(i,j,k,4)=1.0_WP ; ve%SCrec(i,j,k,6)=1.0_WP
-               end do
-            end block ve_bc
+         !    ve_bc : block
+         !       use multiscalar_class, only: bcond
+         !       type(bcond), pointer :: mybc
+         !       integer :: n,i,j,k
+         !       ! Apply all other boundary conditions
+         !       call ve%get_bcond('inflow',mybc)
+         !       do n=1,mybc%itr%no_
+         !          i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+         !          ve%SCrec(i,j,k,:) = 0.0_WP
+         !          ve%SCrec(i,j,k,1)=1.0_WP ; ve%SCrec(i,j,k,4)=1.0_WP ; ve%SCrec(i,j,k,6)=1.0_WP
+         !       end do
+         !    end block ve_bc
 
-            ! Reconstruct lnC for next time step
-            !> get eigenvalues and eigenvectors based on reconstructed C
-            call ve%get_eigensystem_SCrec()
-            !> Reconstruct lnC from eigenvalues and eigenvectors
-            call ve%reconstruct_log_conformation()
-            
-         end if
+         !    ! Reconstruct lnC for next time step
+         !    !> get eigenvalues and eigenvectors based on reconstructed C
+         !    call ve%get_eigensystem_SCrec()
+         !    !> Reconstruct lnC from eigenvalues and eigenvectors
+         !    call ve%reconstruct_log_conformation()
+
+         ! end if
 
          ! ==============================================================================
 
@@ -778,11 +797,14 @@ contains
             fs%V=0.5_WP*(fs%V+fs%Vold); fs%rhoV=0.5_WP*(fs%rhoV+fs%rhoVold)
             fs%W=0.5_WP*(fs%W+fs%Wold); fs%rhoW=0.5_WP*(fs%rhoW+fs%rhoWold)
 
-            ! ==================== Volume Fraction Solver ==================
-            call vf%metric_reset()
-
             ! Buid mid-time volume fraction
             vf%SC=0.5_WP*(vf%SC+vf%SCold)
+
+            ! Build mid-time polymer conformation tensor
+            ve%SC=0.5_WP*(ve%SC+ve%SCold)
+
+            ! ==================== Volume Fraction Solver ==================
+            call vf%metric_reset()
 
             ! Assembly of explicit residual
             call vf%get_drhoSCdt(resVF,fs%rhoU,fs%rhoV,fs%rhoW)
@@ -835,6 +857,111 @@ contains
                   vf%SC(i,j,k) = surfaceConc
                end do
             end block vf_bc
+
+            ! ====================== Conformation tensor solver =================
+
+            ! Reset interpolation metrics to QUICK scheme
+            call ve%metric_reset()
+
+            ! Explicit calculation of drhoSC/dt from scalar equation
+            call ve%get_drhoSCdt(resSC,fs%Uold,fs%Vold,fs%Wold)
+
+            ! Perform bquick procedure
+            bquick: block
+               use viscoelastic_class, only: fenep,lptt,oldroydb
+               integer :: i,j,k
+               logical, dimension(:,:,:), allocatable :: flag
+               ! Allocate work array
+               allocate(flag(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
+               ! Assemble explicit residual
+               resSC=-2.0_WP*(ve%SC-ve%SCold)+time%dt*resSC
+               ! Apply it to get explicit scalar prediction
+               SCtmp1=2.0_WP*ve%SC-ve%SCold+resSC
+               ! Check cells that require bquick
+               do k=ve%cfg%kmino_,ve%cfg%kmaxo_
+                  do j=ve%cfg%jmino_,ve%cfg%jmaxo_
+                     do i=ve%cfg%imino_,ve%cfg%imaxo_
+                        if (SCtmp1(i,j,k,1).le.0.0_WP.or.SCtmp1(i,j,k,4).le.0.0_WP.or.SCtmp1(i,j,k,6).le.0.0_WP.or.&
+                        &   SCtmp1(i,j,k,1)+SCtmp1(i,j,k,4)+SCtmp1(i,j,k,6).ge.ve%Lmax**2) then
+                           flag(i,j,k)=.true.
+                        else
+                           flag(i,j,k)=.false.
+                        end if
+                     end do
+                  end do
+               end do
+               ! Adjust metrics
+               call ve%metric_adjust(SCtmp1,flag)
+               ! Clean up
+               deallocate(flag)
+               ! Recompute drhoSC/dt
+               call ve%get_drhoSCdt(resSC,fs%Uold,fs%Vold,fs%Wold)
+            end block bquick
+
+            ! Calculate grad(U)
+            call fs%get_gradu(gradu)
+            ! call applyExtraGradU()
+
+            call ve%get_CgradU(gradU,SCtmp1)
+            call ve%get_relax(SCtmp2,time%dt) ; SCtmp1 = SCtmp1+SCtmp2
+
+            vf%diff = 0.0_WP
+            call vf%get_drhodt(time%dt, resVF)
+            call vf%get_drhoSCdt(vfTmp, fs%Uold,fs%Vold,fs%Wold) ; resVF = resVF+vfTmp
+
+            ! Add source term to residual
+            do k=cfg%kmino_,cfg%kmaxo_
+               do j=cfg%jmino_,cfg%jmaxo_
+                  do i=cfg%imino_,cfg%imaxo_
+                     if (ve%mask(i,j,k).ne.0) cycle                !< Skip non-solved cells
+                     resSC(i,j,k,:) = resSC(i,j,k,:) + resVF(i,j,k)*ve%SCrec(i,j,k,:) + vf%SC(i,j,k)*SCtmp1(i,j,k,:)
+                  end do
+               end do
+            end do
+
+            ! Assemble explicit residual for \phi*C
+            resSC=-2.0_WP*(ve%SC-ve%SCold)+time%dt*resSC
+            ! Form implicit residual
+            ! call ve%solve_implicit(time%dt,resSC,fs%Uold,fs%Vold,fs%Wold)
+            ! Update scalars
+            ve%SC=2.0_WP*ve%SC-ve%SCold+resSC
+            ! Apply all other boundary conditions on the resulting field
+            ! Apply boundary conditions
+            ve_bc : block
+               use multiscalar_class, only: bcond
+               type(bcond), pointer :: mybc
+               integer :: n,i,j,k
+               ! Apply all other boundary conditions
+               call ve%apply_bcond(time%t,time%dt)
+               call ve%get_bcond('inflow',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  ve%SC(i,j,k,:) = 0.0_WP*identity
+               end do
+               call ve%get_bcond('bottom',mybc)
+               do n=1,mybc%itr%no_
+                  i=mybc%itr%map(1,n); j=mybc%itr%map(2,n); k=mybc%itr%map(3,n)
+                  ve%SC(i,j,k,:) = surfaceConc*identity
+               end do
+            end block ve_bc
+
+            rec_C : block
+               ! Reconstruct the C tensor from \phi*C
+               integer :: i, j, k
+               real(WP) :: phi
+               do k=cfg%kmino_,cfg%kmaxo_
+                  do j=cfg%jmino_,cfg%jmaxo_
+                     do i=cfg%imino_,cfg%imaxo_
+                        phi = vf%SC(i,j,k)
+                        if (phi .lt. threshold) then
+                           ve%SCrec(i,j,k,:) = identity
+                        else
+                           ve%SCrec(i,j,k,:) = ve%SC(i,j,k,:)/phi
+                        end if
+                     end do
+                  end do
+               end do
+            end block rec_C
 
             ! ===================== Velocity Solver =======================
 
@@ -1000,9 +1127,7 @@ contains
          ! Perform and output monitoring
          call fs%get_max()
          call vf%get_max()
-         if (stabilization) then
-            call ve%get_max_reconstructed()
-         end if
+         call ve%get_max_reconstructed()
          call mfile%write()
          call cflfile%write()
          call scfile%write()
