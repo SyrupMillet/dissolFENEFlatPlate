@@ -730,6 +730,8 @@ contains
             ! call ve%get_drhoSCdt(resSC,PdiffU,PdiffV,PdiffW)
             call ve%get_drhoSCdt(drhoSCdt=resSC,rhoU=fs%U,rhoV=fs%V,rhoW=fs%W)
             ve%SC = ve%SCold + time%dt*resSC
+
+            call ve%apply_bcond(time%t,time%dt)
          end block advance_scalar
 
 
@@ -760,7 +762,7 @@ contains
             call ve%get_eigensystem_SCrec()
             !> Reconstruct lnC from eigenvalues and eigenvectors
             call ve%reconstruct_log_conformation()
-            call ve%apply_bcond(time%t,time%dt)
+            
          end if
 
          ! ==============================================================================
